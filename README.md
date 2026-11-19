@@ -7,18 +7,23 @@
 A pre-token launch radar: 198 protocols whose DefiLlama record carries no token, ranked
 by an implied value, each with a concrete farm plan.
 
-## The model (radar-2)
+## The model (radar-3)
 
-The multiple is not a constant the author picked. It is the market's own pricing, read off
-the snapshot: the median market-cap-to-TVL ratio of the live-token protocols in the row's
-category (ratios outside 0–10 dropped as outliers, at least 3 comparables), falling back to
-the market-wide median (0.191x) where a category has too few. Then:
+The pricing is fitted, not picked. A log-log size curve — log(market cap) =
+5.6138 + 0.5831 x log(TVL) — is fitted by ordinary least squares over the 121
+live-token protocols in the snapshot (market-cap-to-TVL ratios outside 0–10 dropped
+as outliers). Then:
 
 ```
-implied = round( tvl_usd x multiple(category)
+implied = round( exp(5.6138 + 0.5831 x ln(tvl_usd))
                  x (1 + clamp(change_7d, -50, +100) / 100 x 0.5)
                  x (0.6 + min(age_days, 1095) / 1095 x 0.4) )
 ```
+
+The curve is validated out of sample before it is used: leave-one-out log-RMSE 1.808
+against 2.114 for the old category-median multiple, and 5-fold 1.798 against 2.113.
+Category effects (ridge-shrunk dummies, top-5 categories, shrunk residuals) were tested
+the same way and did not beat the pooled curve, so the model carries no category term.
 
 Growth is the seven-day TVL change; maturity is the time since DefiLlama first listed the
 protocol, the best record of how long it has run with no token (unknown age uses 365 days).
@@ -38,9 +43,9 @@ No protocol name is special-cased.
 
 `dashboard/` is a static page (no framework, no network): a sortable, filterable board,
 a detail drawer per protocol with the implied-value breakdown, the live comparables behind
-its multiple, and its six-step farm plan, plus the model panel with every category's
-multiple. The page recomputes each row from the snapshot figures and checks the number
-`board.json` carries.
+its fitted value, and its six-step farm plan with a break-even cost, plus the model panel
+with the fitted curve, its out-of-sample validation, and the curve's multiples. The page
+recomputes each row from the snapshot figures and checks the number `board.json` carries.
 
 ## Run it
 

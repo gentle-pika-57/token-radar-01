@@ -27,17 +27,22 @@
     return Math.max(0, Math.round(days)) + 'd';
   }
   function fmtMult(n) { return n.toFixed(3) + 'x'; }
+  function curveAt(tvl) {
+    var pts = DATA.curve_points || [];
+    for (var i = 0; i < pts.length; i++) if (pts[i].tvl_usd === tvl) return pts[i].fitted_multiple;
+    return null;
+  }
 
   // The model in one function: the page recomputes a row from the snapshot figures and checks
   // the number board.json carries, so the page's code and the board's data are visibly the
-  // same arithmetic. The multiple comes from the row: the market read it off the live
-  // protocols in the row's category, or the market-wide median where the category has too few.
+  // same arithmetic. The fitted value comes from the row: the size curve read off the live
+  // protocols, evaluated at the row's TVL.
   function impliedOf(row, model) {
     var growth = Math.min(model.growth_cap, Math.max(model.growth_floor, row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d));
     var growthMult = 1 + (growth / 100) * model.growth_weight;
     var age = row.age_days === null || row.age_days === undefined ? model.unknown_age_days : row.age_days;
     var maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
-    return Math.max(1, Math.round(row.tvl_usd * row.multiple * growthMult * maturity));
+    return Math.max(1, Math.round(row.fitted_value * growthMult * maturity));
   }
 
   function el(tag, attrs) {
@@ -65,6 +70,17 @@
   // and age decide the action, the capital, the hold and every cost and time. No name is
   // special-cased.
   function chainOf(p) { return p.chains && p.chains.length > 0 ? p.chains[0] : 'its main chain'; }
+  function gasUsd(chain) {
+    var c = chain.toLowerCase();
+    if (c.indexOf('ethereum') >= 0) return 8;
+    if (c.indexOf('solana') >= 0) return 0.1;
+    if (c.indexOf('binance') >= 0 || c.indexOf('bnb') >= 0) return 0.3;
+    if (c.indexOf('polygon') >= 0) return 0.1;
+    if (c.indexOf('avalanche') >= 0) return 0.5;
+    if (c.indexOf('base') >= 0 || c.indexOf('arbitrum') >= 0 || c.indexOf('optimism') >= 0 || c.indexOf('monad') >= 0 || c.indexOf('hyperliquid') >= 0) return 0.5;
+    return 2;
+  }
+  function fmtGasUsd(n) { return n < 1 ? '$' + n.toFixed(2) : '$' + n; }
   function gasFor(chain) {
     var c = chain.toLowerCase();
     if (c.indexOf('ethereum') >= 0) return 'about $8 of gas';
@@ -126,12 +142,16 @@
     var capital = capitalFor(p);
     var hold = holdDaysFor(p.age_days);
     var gas = gasFor(chain);
+    var gasPerTx = gasUsd(chain);
     var weekly = weeklyFor(p);
+    var totalGas = gasPerTx * (1 + Math.ceil(hold / 7));
+    var breakEvenPct = (totalGas / capital) * 100;
+    var breakEven = breakEvenPct >= 100 ? Math.round(breakEvenPct) + '%' : breakEvenPct.toFixed(1) + '%';
     return [
       { text: 'Use a fresh wallet that holds only the funds you plan to farm, and keep its seed phrase offline.', cost: 'nothing to set up, and the first transaction costs ' + gas, time: '5 minutes' },
       { text: actionFor(p, capital, chain), cost: '$' + capital + ' of capital and ' + gas, time: '15 minutes to set up' },
-      { text: 'Once a week, ' + weekly.charAt(0).toLowerCase() + weekly.slice(1), cost: 'about $2 of gas a week', time: '10 minutes a week' },
-      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot.', cost: 'the $' + capital + ' stays in the position', time: hold + ' days' },
+      { text: 'Once a week, ' + weekly.charAt(0).toLowerCase() + weekly.slice(1), cost: 'about ' + fmtGasUsd(gasPerTx) + ' of gas a week', time: '10 minutes a week' },
+      { text: 'Hold the position for at least ' + hold + ' days so the activity is counted in more than one snapshot. The farm costs about ' + fmtGasUsd(totalGas) + ' in gas over those ' + hold + ' days on $' + capital + ' of capital, so it breaks even if the position earns ' + breakEven + ' over the hold.', cost: 'the $' + capital + ' stays in the position, and the gas bill is ' + fmtGasUsd(totalGas), time: hold + ' days' },
       { text: "Before you withdraw, open the protocol's own points or rewards page and claim only from the link it publishes.", cost: 'no fee to check, and never pay to claim', time: '10 minutes' },
       { text: 'Write the wallet, the dates and every transaction in a farm log so you can repeat the position or unwind it.', cost: 'nothing but the log', time: '5 minutes' }
     ].map(stepText);
@@ -203,7 +223,7 @@
       el('div', { class: 'facts' },
         el('div', { class: 'fact' }, el('span', { text: 'Watchlist covered' }), el('b', { text: DATA.watchlist_size + ' / ' + DATA.watchlist_size })),
         el('div', { class: 'fact' }, el('span', { text: 'Top implied value' }), el('b', { text: top ? fmtUsd(top.implied_value_usd) : 'n/a' })),
-        el('div', { class: 'fact' }, el('span', { text: 'Market-wide multiple' }), el('b', { text: fmtMult(DATA.global_multiple) })),
+        el('div', { class: 'fact' }, el('span', { text: 'Fitted multiple at $1B TVL' }), el('b', { text: (function () { var x = curveAt(1e9); return x === null ? 'n/a' : fmtMult(x); })() })),
         el('div', { class: 'fact' }, el('span', { text: 'Live-token protocols set aside' }), el('b', { text: String(DATA.live_size) }))
       )
     );
@@ -357,27 +377,46 @@
 
   function modelPanel() {
     var m = DATA.model;
-    var rows = DATA.multiples.map(function (x) {
+    var f = DATA.fit;
+    var v = DATA.validation;
+    var valRows = [
+      ['Leave-one-out log-RMSE', v.loo_rmse.toFixed(4), v.loo_rmse_median.toFixed(4)],
+      ['5-fold log-RMSE', v.cv_rmse.toFixed(4), v.cv_rmse_median.toFixed(4)],
+      ['Median absolute error', (v.median_abs_pct_err * 100).toFixed(1) + '%', (v.median_abs_pct_err_median * 100).toFixed(1) + '%']
+    ].map(function (r) {
       return el('tr', null,
-        el('td', { text: x.category }),
-        el('td', { class: 'num', text: fmtMult(x.multiple) }),
-        el('td', { class: 'num', text: String(x.comparables) }),
-        el('td', { class: 'sub', text: x.fallback ? 'market-wide median' : 'category median' })
+        el('td', { text: r[0] }),
+        el('td', { class: 'num', text: r[1] }),
+        el('td', { class: 'num', text: r[2] })
+      );
+    });
+    var curveRows = (DATA.curve_points || []).map(function (x) {
+      return el('tr', null,
+        el('td', { class: 'num', text: fmtUsd(x.tvl_usd) }),
+        el('td', { class: 'num', text: fmtMult(x.fitted_multiple) }),
+        el('td', { class: 'num', text: fmtUsd(x.tvl_usd * x.fitted_multiple) })
       );
     });
     return el('section', { class: 'panel model' },
       el('h2', { text: 'How implied value is computed' }),
-      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. The multiple is not a constant the author picked: it is the median market-cap-to-TVL ratio of the live-token protocols in the row\u2019s category, read off this same snapshot, falling back to the market-wide median where a category has fewer than ' + m.min_comparables + ' live comparables. No protocol name is special-cased, and no row is hand-picked.' }),
+      el('p', { class: 'sub', text: 'Every row is scored by one function of the snapshot figures. The pricing is fitted, not picked: a log-log size curve, log(market cap) = ' + f.intercept.toFixed(4) + ' + ' + f.slope.toFixed(4) + ' x log(TVL), fitted by ordinary least squares over ' + f.comparables + ' live-token protocols in this same snapshot (market-cap-to-TVL ratios outside 0 to 10 dropped as outliers). A slope under 1 is the market\u2019s own pricing: the multiple falls as TVL grows, so a giant protocol is worth a smaller multiple than a small one. No protocol name is special-cased, and no row is hand-picked.' }),
       el('div', { class: 'formula' },
-        'implied = round( tvl_usd x multiple(category) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
+        'implied = round( exp(' + f.intercept.toFixed(4) + ' + ' + f.slope.toFixed(4) + ' x ln(tvl_usd)) x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range + ') )'
       ),
       el('div', { class: 'table-wrap' },
         el('table', { class: 'mult-table' },
-          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Category' }), el('th', { scope: 'col', text: 'Multiple' }), el('th', { scope: 'col', text: 'Comparables' }), el('th', { scope: 'col', text: 'Source' }))),
-          el('tbody', null, rows)
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Out-of-sample check' }), el('th', { scope: 'col', text: 'Fitted curve' }), el('th', { scope: 'col', text: 'Median multiple' }))),
+          el('tbody', null, valRows)
         )
       ),
-      el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Ratios outside 0 to 10 are dropped as outliers before the median is taken.' })
+      el('p', { class: 'sub', text: 'Validation refits both models on every fold, so the numbers are honest about a curve the model has never seen: leave-one-out over all ' + f.comparables + ' comparables, and 5-fold splits. The fitted curve wins both. Category effects were tested the same way — ridge-shrunk category terms, the five largest categories, and shrunk category residuals — and none beat the pooled curve out of sample at this sample size, so the model carries no category term. Residual spread around the curve is ' + f.residual_sd.toFixed(2) + ' in log space: the curve is a central estimate, not a promise.' }),
+      el('div', { class: 'table-wrap' },
+        el('table', { class: 'mult-table' },
+          el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'TVL' }), el('th', { scope: 'col', text: 'Fitted multiple' }), el('th', { scope: 'col', text: 'Fitted value' }))),
+          el('tbody', null, curveRows)
+        )
+      ),
+      el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days.' })
     );
   }
 
@@ -393,9 +432,7 @@
     var steps = farmSteps(row);
     var recomputed = impliedOf(row, DATA.model);
     var comps = (DATA.comps || []).filter(function (c) { return c.category === row.category; })[0];
-    var multNote = comps
-      ? 'Median of ' + comps.entries.length + ' largest live ' + (row.category || 'Other') + ' comparables shown below.'
-      : 'Fewer than ' + DATA.model.min_comparables + ' live comparables in this category, so the market-wide median ' + fmtMult(DATA.global_multiple) + ' is used.';
+    var multNote = 'Fitted from ' + DATA.fit.comparables + ' live-token protocols: log(market cap) = ' + DATA.fit.intercept.toFixed(4) + ' + ' + DATA.fit.slope.toFixed(4) + ' x log(TVL).';
     dialog.appendChild(el('div', { class: 'detail-head' },
       el('div', null,
         el('span', { class: 'brand-name', text: 'Rank ' + row.rank + ' of ' + DATA.board_size }),
@@ -408,7 +445,8 @@
       el('h3', { text: 'Implied value' }),
       el('div', { class: 'equation' },
         el('div', null, el('span', { text: 'TVL' }), el('b', { class: 'num', text: fmtUsd(row.tvl_usd) })),
-        el('div', null, el('span', { text: 'Category multiple' }), el('b', { class: 'num', text: fmtMult(row.multiple) })),
+        el('div', null, el('span', { text: 'Fitted value' }), el('b', { class: 'num', text: fmtUsd(row.fitted_value) })),
+        el('div', null, el('span', { text: 'Fitted multiple' }), el('b', { class: 'num', text: fmtMult(row.fitted_value / row.tvl_usd) })),
         el('div', null, el('span', { text: 'Seven-day growth' }), el('b', { class: 'num', text: fmtPct(row.change_7d) })),
         el('div', null, el('span', { text: 'Age with no token' }), el('b', { class: 'num', text: fmtAge(row.age_days) })),
         el('div', null, el('span', { text: 'Growth multiplier' }), el('b', { class: 'num', text: String(row.growth_multiplier) })),
@@ -419,11 +457,11 @@
     ));
     if (comps) {
       dialog.appendChild(el('section', { class: 'detail-section' },
-        el('h3', { text: 'Where the multiple comes from' }),
+        el('h3', { text: 'Live comparables in this category' }),
         el('div', { class: 'comps' }, comps.entries.map(function (e) {
           return el('div', null, el('span', { text: e.name }), el('b', { class: 'num', text: fmtMult(e.ratio) }));
         })),
-        el('p', { class: 'sub', text: 'Live ' + (row.category || 'Other') + ' protocols, market cap over TVL. The median of all of them — not just these five — is the multiple.' })
+        el('p', { class: 'sub', text: 'Live ' + (row.category || 'Other') + ' protocols, market cap over TVL, shown for comparison. The fitted multiple at this TVL is ' + fmtMult(row.fitted_value / row.tvl_usd) + ' — the size curve, not a category median, sets the value.' })
       ));
     }
     dialog.appendChild(el('section', { class: 'detail-section' },

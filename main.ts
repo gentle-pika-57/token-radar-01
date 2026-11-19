@@ -84,6 +84,8 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEX
 
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows ranked (${radar.early_size} early, ${radar.set_aside_size} set aside, ${radar.live_size} live shown apart)\n` +
+    `token radar: size curve log(mcap) = ${radar.fit.intercept.toFixed(4)} + ${radar.fit.slope.toFixed(4)} x log(tvl), n=${radar.fit.comparables}, residual sd ${radar.fit.residual_sd.toFixed(4)}\n` +
+    `token radar: validation LOO log-RMSE ${radar.validation.loo_rmse.toFixed(4)} vs median baseline ${radar.validation.loo_rmse_median.toFixed(4)}; 5-fold ${radar.validation.cv_rmse.toFixed(4)} vs ${radar.validation.cv_rmse_median.toFixed(4)}\n` +
     `token radar: implied value $${board[0]!.implied_value_usd.toLocaleString('en-US')} at rank 1 down to $${board[board.length - 1]!.implied_value_usd.toLocaleString('en-US')} at rank ${board.length}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')}, ${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
